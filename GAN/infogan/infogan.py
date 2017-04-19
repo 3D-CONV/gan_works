@@ -92,12 +92,19 @@ D_real = discriminator(X)
 D_fake = discriminator(G_sample)
 Q_c_given_x = Q(G_sample)
 
+with tf.name_scope('fake_image'):
+    fake_image = tf.reshape(G_sample, [-1, 28, 28, 1])
+    tf.summary.image('fake', fake_image, 16)
+
 D_loss = -tf.reduce_mean(tf.log(D_real + 1e-8) + tf.log(1 - D_fake + 1e-8))
 G_loss = -tf.reduce_mean(tf.log(D_fake + 1e-8))
+tf.summary.scalar('d_loss', D_loss)
+tf.summary.scalar('g_loss', G_loss)
 
 cross_ent = tf.reduce_mean(-tf.reduce_sum(tf.log(Q_c_given_x + 1e-8) * c, 1))
 ent = tf.reduce_mean(-tf.reduce_sum(tf.log(c + 1e-8) * c, 1))
 Q_loss = cross_ent + ent
+tf.summary.scalar('q_loss', Q_loss)
 
 D_solver = tf.train.AdamOptimizer().minimize(D_loss, var_list=theta_D)
 G_solver = tf.train.AdamOptimizer().minimize(G_loss, var_list=theta_G)
@@ -112,8 +119,13 @@ mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
 gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
 config = tf.ConfigProto(gpu_options=gpu_options)
 config.gpu_options.allow_growth=True
-sess = tf.Session(config=config)
+sess = tf.InteractiveSession(config=config)
 sess.run(tf.global_variables_initializer())
+
+# Merge all the summaries and write them out to /tmp/tensorflow/loam/ (by default)
+merged = tf.summary.merge_all()
+logger = tf.summary.FileWriter('/tmp/tensorflow/infogan/', sess.graph)
+tf.global_variables_initializer().run()
 
 if not os.path.exists('out/'):
     os.makedirs('out/')
@@ -121,19 +133,17 @@ if not os.path.exists('out/'):
 i = 0
 
 for it in range(10000000):
-    if it % 1000 == 0:
-        Z_noise = sample_Z(16, Z_dim)
+    if it % 100 == 0:
+        Z_noise = sample_Z(32, Z_dim)
+        X_mb, _ = mnist.train.next_batch(mb_size)
         
         idx = np.random.randint(0, 10)
-        c_noise = np.zeros([16, 10])
-        c_noise[range(16), idx] = 1
+        c_noise = np.zeros([32, 10])
+        c_noise[range(32), idx] = 1
         
-        samples = sess.run(G_sample, 
-                           feed_dict={Z: Z_noise, c: c_noise})
-        fig = plot(samples)
-        plt.savefig('out/{}.png'.format(str(i).zfill(3)), bbox_inches='tight')
-        i += 1
-        plt.close(fig)
+        summary, samples = sess.run([merged, G_sample], 
+                           feed_dict={X: X_mb, Z: Z_noise, c: c_noise})
+        logger.add_summary(summary, it)
 
     X_mb, _ = mnist.train.next_batch(mb_size)
     Z_noise = sample_Z(mb_size, Z_dim)
@@ -145,10 +155,14 @@ for it in range(10000000):
     _, G_loss_curr = sess.run([G_solver, G_loss],
                               feed_dict={Z: Z_noise, c: c_noise})
 
-    sess.run([Q_solver], feed_dict={Z: Z_noise, c: c_noise})
 
+    sess.run([Q_solver], feed_dict={Z: Z_noise, c: c_noise})
+    
     if it % 1000 == 0:
         print('Iter: {}'.format(it))
         print('D loss: {:.4}'.format(D_loss_curr))
         print('G_loss: {:.4}'.format(G_loss_curr))
         print()
+
+logger.close()
+

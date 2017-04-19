@@ -7,13 +7,15 @@ import os
 
 
 mb_size = 32
-X_dim = 784
+Map_size = 64
+X_dim = Map_size * Map_size
 z_dim = 64
 h_dim = 128
 lr = 1e-3
 d_steps = 3
 
 mnist = input_data.read_data_sets('../../MNIST_data', one_hot=True)
+file_name="test.tfrecords"
 
 
 def plot(samples):
@@ -27,7 +29,7 @@ def plot(samples):
         ax.set_xticklabels([])
         ax.set_yticklabels([])
         ax.set_aspect('equal')
-        plt.imshow(sample.reshape(28, 28), cmap='Greys_r')
+        plt.imshow(sample.reshape(Map_size, Map_size), cmap='Greys_r')
 
     return fig
 
@@ -40,6 +42,28 @@ def xavier_init(size):
 
 def log(x):
     return tf.log(x + 1e-8)
+
+def read_and_decode(filename_queue):
+
+    reader = tf.TFRecordReader()
+    _, serialized_example = reader.read(filename_queue)
+    features = tf.parse_single_example(serialized_example,
+                                       features={'img_raw': tf.FixedLenFeature([], tf.string),})
+
+    img = tf.decode_raw(features['img_raw'], tf.uint8)
+    img = tf.reshape(img, [X_dim])
+    return img
+
+def input_pipeline(filenames, batch_size, num_epochs=None):
+    filename_queue = tf.train.string_input_producer(
+        [filenames],shuffle=True)
+    example = read_and_decode(filename_queue)
+    min_after_dequeue = 400
+    capacity = min_after_dequeue + 3 * batch_size
+    example_batch  = tf.train.shuffle_batch(
+        [example], batch_size=batch_size, capacity=capacity,
+        min_after_dequeue=min_after_dequeue)
+    return example_batch
 
 
 X = tf.placeholder(tf.float32, shape=[None, X_dim])
@@ -89,23 +113,11 @@ def D(X, z):
 z_hat = Q(X)
 X_hat = P(z)
 
-with tf.name_scope('fake_image'):
-    fake_image = tf.reshape(X_hat, [-1, 28, 28, 1])
-    tf.summary.image('fake', fake_image, 32)
-
 D_enc = D(X, z_hat)
 D_gen = D(X_hat, z)
 
 D_loss = -tf.reduce_mean(log(D_enc) + log(1 - D_gen))
 G_loss = -tf.reduce_mean(log(D_gen) + log(1 - D_enc))
-D_enc  = -tf.reduce_mean(log(D_enc))
-D_gen  = -tf.reduce_mean(log(D_gen))
-
-with tf.name_scope('loss_result'):
-    tf.summary.scalar('d_enc', D_enc)
-    tf.summary.scalar('d_gen', D_gen)
-    tf.summary.scalar('d_loss', D_loss)
-    tf.summary.scalar('g_loss', G_loss)
 
 D_solver = (tf.train.AdamOptimizer(learning_rate=lr)
             .minimize(D_loss, var_list=theta_D))
@@ -116,22 +128,24 @@ G_solver = (tf.train.AdamOptimizer(learning_rate=lr)
 gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.333)
 config = tf.ConfigProto(gpu_options=gpu_options)
 config.gpu_options.allow_growth=True
-sess = tf.InteractiveSession(config=config)
+sess = tf.Session(config=config)
 sess.run(tf.global_variables_initializer())
-
-# Merge all the summaries and write them out to /tmp/tensorflow/loam/ (by default)
-merged = tf.summary.merge_all()
-logger = tf.summary.FileWriter('/tmp/tensorflow/ali/', sess.graph)
-tf.global_variables_initializer().run()
-
 
 if not os.path.exists('out/'):
     os.makedirs('out/')
 
 i = 0
 
+init_op = tf.global_variables_initializer()
+sess.run(init_op)
+
+example_batch = input_pipeline(file_name, mb_size, 1)
+coord = tf.train.Coordinator()
+threads = tf.train.start_queue_runners(sess=sess, coord=coord)
 for it in range(1000000):
-    X_mb, _ = mnist.train.next_batch(mb_size)
+    # import raw data
+    #X_mb, _ = mnist.train.next_batch(mb_size)
+    X_mb = sess.run(example_batch)
     z_mb = sample_z(mb_size, z_dim)
 
     _, D_loss_curr = sess.run(
@@ -146,7 +160,15 @@ for it in range(1000000):
         print('Iter: {}; D_loss: {:.4}; G_loss: {:.4}'
               .format(it, D_loss_curr, G_loss_curr))
 
-        summary, samples = sess.run([merged, X_hat], feed_dict={X: X_mb, z: sample_z(32, z_dim)})
-        logger.add_summary(summary, it)
+        samples = sess.run(X_hat, feed_dict={z: sample_z(16, z_dim)})
 
-logger.close()
+        fig = plot(samples)
+        #fig = plot(X_mb[0:16])
+        plt.savefig('out/{}.png'
+                    .format(str(i).zfill(3)), bbox_inches='tight')
+        i += 1
+        plt.close(fig)
+
+coord.request_stop()
+coord.join(threads)
+sess.close()
